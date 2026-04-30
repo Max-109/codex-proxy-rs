@@ -12,6 +12,7 @@ pub struct ProxySettings {
     pub speed: Speed,
     pub host: IpAddr,
     pub port: u16,
+    pub detailed_logs: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -45,6 +46,7 @@ impl Default for ProxySettings {
             speed: Speed::Normal,
             host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             port: 8080,
+            detailed_logs: false,
         }
     }
 }

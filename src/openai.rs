@@ -193,10 +193,11 @@ impl ChatCompletionRequest {
 
         Ok(CodexRequest {
             model: upstream_model.to_string(),
-            instructions: "You are Codex.".to_string(),
+            instructions: codex_instructions_from_messages(&self.messages),
             input: self
                 .messages
                 .iter()
+                .filter(|message| message.role != "system")
                 .map(chat_message_to_codex_input)
                 .collect::<Result<Vec<_>, _>>()?,
             reasoning: CodexReasoning {
@@ -207,6 +208,39 @@ impl ChatCompletionRequest {
             service_tier: upstream_service_tier,
             prompt_cache_key: None,
         })
+    }
+}
+
+fn codex_instructions_from_messages(messages: &[ChatMessage]) -> String {
+    let system_text = messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .filter_map(chat_message_text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if system_text.is_empty() {
+        return "You are Codex.".to_string();
+    }
+
+    system_text
+}
+
+fn chat_message_text(chat_message: &ChatMessage) -> Option<String> {
+    match &chat_message.content {
+        ChatMessageContent::Text(text) => Some(text.clone()),
+        ChatMessageContent::Parts(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| match part {
+                    ChatMessageContentPart::Text { text } => Some(text.as_str()),
+                    ChatMessageContentPart::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if text.is_empty() { None } else { Some(text) }
+        }
     }
 }
 
@@ -369,6 +403,67 @@ mod tests {
     }
 
     #[test]
+    fn system_messages_become_instructions_not_input() {
+        let upstream_request = ChatCompletionRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: ChatMessageContent::Text("answer in Lithuanian".to_string()),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: ChatMessageContent::Text("hello".to_string()),
+                },
+            ],
+            stream: false,
+            service_tier: None,
+        }
+        .to_codex_request(&ProxySettings::default())
+        .expect("request should convert");
+
+        assert_eq!(upstream_request.instructions, "answer in Lithuanian");
+        assert_eq!(upstream_request.input.len(), 1);
+        assert_eq!(upstream_request.input[0]["role"], "user");
+    }
+
+    #[test]
+    fn system_part_texts_become_joined_instructions() {
+        let upstream_request = ChatCompletionRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: ChatMessageContent::Parts(vec![
+                        ChatMessageContentPart::Text {
+                            text: "first rule".to_string(),
+                        },
+                        ChatMessageContentPart::ImageUrl {
+                            image_url: ImageUrlPart {
+                                url: "data:image/png;base64,abc".to_string(),
+                            },
+                        },
+                        ChatMessageContentPart::Text {
+                            text: "second rule".to_string(),
+                        },
+                    ]),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: ChatMessageContent::Text("hello".to_string()),
+                },
+            ],
+            stream: false,
+            service_tier: None,
+        }
+        .to_codex_request(&ProxySettings::default())
+        .expect("request should convert");
+
+        assert_eq!(upstream_request.instructions, "first rule\nsecond rule");
+        assert_eq!(upstream_request.input.len(), 1);
+    }
+
+    #[test]
     fn settings_control_reasoning_and_speed_defaults() {
         let upstream_request = ChatCompletionRequest {
             model: "gpt-5.5".to_string(),
@@ -388,5 +483,10 @@ mod tests {
 
         assert_eq!(upstream_request.reasoning.effort, "high");
         assert_eq!(upstream_request.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn default_settings_keep_detailed_logs_off() {
+        assert!(!ProxySettings::default().detailed_logs);
     }
 }

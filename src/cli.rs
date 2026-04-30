@@ -2,7 +2,12 @@ use crate::auth::AuthManager;
 use crate::config::{ProxySettings, ReasoningEffort, SettingsManager, Speed};
 use crate::server::{ServerConfig, run_server};
 use clap::{Parser, Subcommand};
-use inquire::{Confirm, Select, Text};
+use inquire::{
+    Confirm, Select, Text,
+    error::InquireError,
+    ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled},
+};
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
@@ -102,33 +107,37 @@ async fn run_menu(
     auth_manager: AuthManager,
     settings_manager: SettingsManager,
 ) -> anyhow::Result<()> {
-    let settings = settings_manager.load()?;
-    print_menu_header(&auth_manager, &settings);
+    loop {
+        let settings = settings_manager.load()?;
+        clear_terminal();
+        print_menu_header(&auth_manager, &settings);
 
-    match Select::new(
-        "Action",
-        vec![
-            MenuAction::StartProxy,
-            MenuAction::Login,
-            MenuAction::Settings,
-            MenuAction::Logout,
-        ],
-    )
-    .prompt()?
-    {
-        MenuAction::StartProxy => {
-            start_proxy(auth_manager, settings.clone(), settings.host, settings.port).await?;
+        match Select::new(
+            "Action",
+            vec![
+                MenuAction::StartProxy,
+                MenuAction::Login,
+                MenuAction::Settings,
+                MenuAction::Logout,
+            ],
+        )
+        .with_render_config(fleety_render_config())
+        .prompt()?
+        {
+            MenuAction::StartProxy => {
+                start_proxy(auth_manager, settings.clone(), settings.host, settings.port).await?;
+                return Ok(());
+            }
+            MenuAction::Login => {
+                run_login_menu(&auth_manager).await?;
+                let settings = settings_manager.load()?;
+                start_proxy(auth_manager, settings.clone(), settings.host, settings.port).await?;
+                return Ok(());
+            }
+            MenuAction::Settings => run_settings_menu(&auth_manager, &settings_manager)?,
+            MenuAction::Logout => confirm_menu_logout(&auth_manager)?,
         }
-        MenuAction::Login => {
-            run_login_menu(&auth_manager).await?;
-            let settings = settings_manager.load()?;
-            start_proxy(auth_manager, settings.clone(), settings.host, settings.port).await?;
-        }
-        MenuAction::Settings => run_settings_menu(&auth_manager, &settings_manager)?,
-        MenuAction::Logout => confirm_menu_logout(&auth_manager)?,
     }
-
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -171,7 +180,10 @@ impl std::fmt::Display for LoginAction {
 async fn run_login_menu(auth_manager: &AuthManager) -> anyhow::Result<()> {
     print_section_header("Login");
 
-    match Select::new("Method", vec![LoginAction::Browser, LoginAction::Headless]).prompt()? {
+    match Select::new("Method", vec![LoginAction::Browser, LoginAction::Headless])
+        .with_render_config(fleety_render_config())
+        .prompt()?
+    {
         LoginAction::Browser => login_browser(auth_manager).await?,
         LoginAction::Headless => login_headless(auth_manager).await?,
     }
@@ -184,16 +196,27 @@ fn run_settings_menu(
     settings_manager: &SettingsManager,
 ) -> anyhow::Result<()> {
     let mut settings = settings_manager.load()?;
+    let mut status_message = None;
 
     loop {
-        print_settings_header(auth_manager, settings_manager, &settings);
+        clear_terminal();
+        print_settings_header(auth_manager, settings_manager, &settings, status_message);
 
-        match Select::new("Setting", settings_menu_items(&settings))
-            .prompt()?
-            .action
+        let settings_action = match Select::new("Setting", settings_menu_items(&settings))
+            .with_render_config(fleety_render_config())
+            .prompt()
         {
+            Ok(settings_menu_item) => settings_menu_item.action,
+            Err(InquireError::OperationCanceled) => {
+                clear_terminal();
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        match settings_action {
             SettingsAction::ReasoningEffort => {
-                settings.reasoning_effort = Select::new(
+                let selected_reasoning_effort = match Select::new(
                     "Reasoning effort",
                     vec![
                         ReasoningEffort::None,
@@ -205,24 +228,49 @@ fn run_settings_menu(
                     ],
                 )
                 .with_starting_cursor(reasoning_effort_index(settings.reasoning_effort))
-                .prompt()?;
+                .with_render_config(fleety_render_config())
+                .prompt()
+                {
+                    Ok(reasoning_effort) => reasoning_effort,
+                    Err(InquireError::OperationCanceled) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                settings.reasoning_effort = selected_reasoning_effort;
             }
             SettingsAction::Speed => {
-                settings.speed = Select::new("Speed", vec![Speed::Normal, Speed::Fast])
+                let selected_speed = match Select::new("Speed", vec![Speed::Normal, Speed::Fast])
                     .with_starting_cursor(speed_index(settings.speed))
-                    .prompt()?;
+                    .with_render_config(fleety_render_config())
+                    .prompt()
+                {
+                    Ok(speed) => speed,
+                    Err(InquireError::OperationCanceled) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                settings.speed = selected_speed;
             }
             SettingsAction::Host => {
-                settings.host = prompt_host(settings.host)?;
+                let Some(host) = prompt_host(settings.host)? else {
+                    continue;
+                };
+                settings.host = host;
             }
             SettingsAction::Port => {
-                settings.port = prompt_port(settings.port)?;
+                let Some(port) = prompt_port(settings.port)? else {
+                    continue;
+                };
+                settings.port = port;
             }
-            SettingsAction::Back => return Ok(()),
+            SettingsAction::DetailedLogs => {
+                let Some(detailed_logs) = prompt_detailed_logs(settings.detailed_logs)? else {
+                    continue;
+                };
+                settings.detailed_logs = detailed_logs;
+            }
         }
 
         settings_manager.save(&settings)?;
-        print_settings_saved(settings_manager, &settings);
+        status_message = Some("Settings saved");
     }
 }
 
@@ -232,7 +280,7 @@ enum SettingsAction {
     Speed,
     Host,
     Port,
-    Back,
+    DetailedLogs,
 }
 
 #[derive(Clone, Debug)]
@@ -266,8 +314,8 @@ fn settings_menu_items(settings: &ProxySettings) -> Vec<SettingsMenuItem> {
             label: format!("Port            {}", settings.port),
         },
         SettingsMenuItem {
-            action: SettingsAction::Back,
-            label: "Back".to_string(),
+            action: SettingsAction::DetailedLogs,
+            label: format!("Detailed logs   {}", enabled_label(settings.detailed_logs)),
         },
     ]
 }
@@ -290,22 +338,48 @@ fn speed_index(speed: Speed) -> usize {
     }
 }
 
-fn prompt_host(current_host: IpAddr) -> anyhow::Result<IpAddr> {
-    let host_input = Text::new("IP / host")
+fn prompt_host(current_host: IpAddr) -> anyhow::Result<Option<IpAddr>> {
+    let host_input = match Text::new("IP / host")
         .with_initial_value(&current_host.to_string())
-        .prompt()?;
-    host_input
-        .parse()
-        .map_err(|error| anyhow::anyhow!("invalid IP address `{host_input}`: {error}"))
+        .with_render_config(fleety_render_config())
+        .prompt()
+    {
+        Ok(host_input) => host_input,
+        Err(InquireError::OperationCanceled) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    Ok(Some(host_input.parse().map_err(|error| {
+        anyhow::anyhow!("invalid IP address `{host_input}`: {error}")
+    })?))
 }
 
-fn prompt_port(current_port: u16) -> anyhow::Result<u16> {
-    let port_input = Text::new("Port")
+fn prompt_port(current_port: u16) -> anyhow::Result<Option<u16>> {
+    let port_input = match Text::new("Port")
         .with_initial_value(&current_port.to_string())
-        .prompt()?;
-    port_input
-        .parse::<u16>()
-        .map_err(|error| anyhow::anyhow!("invalid port `{port_input}`: {error}"))
+        .with_render_config(fleety_render_config())
+        .prompt()
+    {
+        Ok(port_input) => port_input,
+        Err(InquireError::OperationCanceled) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    Ok(Some(port_input.parse::<u16>().map_err(|error| {
+        anyhow::anyhow!("invalid port `{port_input}`: {error}")
+    })?))
+}
+
+fn prompt_detailed_logs(current_detailed_logs: bool) -> anyhow::Result<Option<bool>> {
+    match Confirm::new("Detailed logs")
+        .with_default(current_detailed_logs)
+        .with_render_config(fleety_render_config())
+        .prompt()
+    {
+        Ok(detailed_logs) => Ok(Some(detailed_logs)),
+        Err(InquireError::OperationCanceled) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn login_headless(auth_manager: &AuthManager) -> anyhow::Result<()> {
@@ -354,6 +428,7 @@ fn confirm_menu_logout(auth_manager: &AuthManager) -> anyhow::Result<()> {
 
     if !Confirm::new("Remove saved Codex auth?")
         .with_default(false)
+        .with_render_config(fleety_render_config())
         .prompt()?
     {
         println!("Logout cancelled.");
@@ -393,20 +468,13 @@ fn print_login_success(auth_manager: &AuthManager, account_id: Option<&str>) {
     }
 }
 
-fn print_settings_saved(settings_manager: &SettingsManager, settings: &ProxySettings) {
-    println!("Settings saved");
-    print_field("File", settings_manager.settings_file().display());
-    print_field("Endpoint", endpoint(settings.host, settings.port));
-    print_field("Reasoning", settings.reasoning_effort);
-    print_field("Speed", settings.speed);
-}
-
 fn print_menu_header(auth_manager: &AuthManager, settings: &ProxySettings) {
     print_section_header("Codex Proxy");
     print_field("Endpoint", endpoint(settings.host, settings.port));
     print_field("Auth", auth_status(auth_manager));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("Logs", enabled_label(settings.detailed_logs));
     println!();
 }
 
@@ -414,11 +482,16 @@ fn print_settings_header(
     auth_manager: &AuthManager,
     settings_manager: &SettingsManager,
     settings: &ProxySettings,
+    status_message: Option<&str>,
 ) {
     print_section_header("Settings");
     print_field("Endpoint", endpoint(settings.host, settings.port));
     print_field("Auth", auth_status(auth_manager));
     print_field("File", settings_manager.settings_file().display());
+    print_field("Logs", enabled_label(settings.detailed_logs));
+    if let Some(status_message) = status_message {
+        print_field("Status", status_message);
+    }
     println!();
 }
 
@@ -427,17 +500,25 @@ fn print_starting_proxy(settings: &ProxySettings, host: IpAddr, port: u16) {
     print_field("Endpoint", endpoint(host, port));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("Logs", enabled_label(settings.detailed_logs));
     println!();
 }
 
 fn print_section_header(title: &str) {
     println!();
-    println!("{title}");
-    println!("{}", "-".repeat(title.len()));
+    println!("{}", paint(title, FleetyTerminalColor::Primary));
+    println!(
+        "{}",
+        paint("-".repeat(title.len()), FleetyTerminalColor::Muted)
+    );
 }
 
 fn print_field(label: &str, value: impl std::fmt::Display) {
-    println!("{label:<10} {value}");
+    println!(
+        "{} {}",
+        paint(format!("{label:<10}"), FleetyTerminalColor::Muted),
+        paint(value, FleetyTerminalColor::Secondary)
+    );
 }
 
 fn endpoint(host: IpAddr, port: u16) -> String {
@@ -450,4 +531,73 @@ fn auth_status(auth_manager: &AuthManager) -> &'static str {
     }
 
     "not signed in"
+}
+
+fn enabled_label(enabled: bool) -> &'static str {
+    if enabled {
+        return "enabled";
+    }
+
+    "disabled"
+}
+
+fn fleety_render_config() -> RenderConfig<'static> {
+    RenderConfig::empty()
+        .with_prompt_prefix(Styled::new("?").with_fg(fleety_blue()))
+        .with_answered_prompt_prefix(Styled::new(">").with_fg(fleety_blue()))
+        .with_help_message(StyleSheet::new().with_fg(fleety_muted()))
+        .with_answer(StyleSheet::new().with_fg(fleety_primary()))
+        .with_error_message(
+            ErrorMessageRenderConfig::empty()
+                .with_prefix(Styled::new("#").with_fg(fleety_red()))
+                .with_message(StyleSheet::new().with_fg(fleety_red())),
+        )
+        .with_highlighted_option_prefix(Styled::new(">").with_fg(fleety_blue()))
+        .with_scroll_up_prefix(Styled::new("^").with_fg(fleety_muted()))
+        .with_scroll_down_prefix(Styled::new("v").with_fg(fleety_muted()))
+        .with_option(StyleSheet::new().with_fg(fleety_secondary()))
+        .with_selected_option(Some(StyleSheet::new().with_fg(fleety_primary())))
+        .with_text_input(StyleSheet::new().with_fg(fleety_primary()))
+        .with_default_value(StyleSheet::new().with_fg(fleety_muted()))
+}
+
+fn fleety_primary() -> Color {
+    Color::AnsiValue(255)
+}
+
+fn fleety_secondary() -> Color {
+    Color::AnsiValue(250)
+}
+
+fn fleety_muted() -> Color {
+    Color::AnsiValue(245)
+}
+
+fn fleety_blue() -> Color {
+    Color::AnsiValue(68)
+}
+
+fn fleety_red() -> Color {
+    Color::AnsiValue(167)
+}
+
+enum FleetyTerminalColor {
+    Primary,
+    Secondary,
+    Muted,
+}
+
+fn paint(value: impl std::fmt::Display, color: FleetyTerminalColor) -> String {
+    let (red, green, blue) = match color {
+        FleetyTerminalColor::Primary => (244, 244, 244),
+        FleetyTerminalColor::Secondary => (184, 184, 184),
+        FleetyTerminalColor::Muted => (133, 133, 133),
+    };
+
+    format!("\x1b[38;2;{red};{green};{blue}m{value}\x1b[0m")
+}
+
+fn clear_terminal() {
+    print!("\x1b[2J\x1b[H");
+    let _ = io::stdout().flush();
 }

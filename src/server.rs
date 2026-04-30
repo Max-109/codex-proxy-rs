@@ -21,6 +21,7 @@ use futures_util::{Stream, StreamExt};
 use rand::RngCore;
 use serde_json::Value;
 use std::convert::Infallible;
+use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::time::Instant;
@@ -79,17 +80,50 @@ async fn handle_models() -> Json<crate::openai::ModelsResponse> {
 
 async fn handle_chat_completions(
     State(app_state): State<AppState>,
-    Json(chat_completion_request): Json<ChatCompletionRequest>,
+    request_body: Bytes,
 ) -> Result<Response, ProxyError> {
+    log_json_body(
+        "client chat completion body",
+        &request_body,
+        app_state.settings.detailed_logs,
+    );
+
+    let chat_completion_request: ChatCompletionRequest = serde_json::from_slice(&request_body)
+        .map_err(|error| {
+            tracing::warn!(error = %error, "failed to parse chat completion request");
+            ProxyError::InvalidRequest(format!("invalid JSON chat completion request: {error}"))
+        })?;
+    let request_stats = chat_request_stats(&chat_completion_request);
+
     tracing::info!(
         model = %chat_completion_request.model,
         stream = chat_completion_request.stream,
         messages = chat_completion_request.messages.len(),
+        roles = request_stats.roles,
+        text_chars = request_stats.text_chars,
+        image_parts = request_stats.image_parts,
         "chat completion request"
     );
 
     let mut upstream_request = chat_completion_request.to_codex_request(&app_state.settings)?;
     upstream_request.prompt_cache_key = Some(app_state.conversation_id.clone());
+    let upstream_request_json = serde_json::to_value(&upstream_request)
+        .expect("upstream request should serialize for diagnostics");
+    tracing::info!(
+        upstream_model = %upstream_request.model,
+        upstream_stream = upstream_request.stream,
+        upstream_service_tier = upstream_request.service_tier.as_deref().unwrap_or("none"),
+        upstream_reasoning_effort = %upstream_request.reasoning.effort,
+        upstream_input_items = upstream_request.input.len(),
+        upstream_images = count_input_images(&upstream_request_json),
+        "forwarding codex request"
+    );
+    log_json_value(
+        "upstream codex request body",
+        &upstream_request_json,
+        app_state.settings.detailed_logs,
+    );
+
     let saved_auth = app_state.auth_manager.access_token().await?;
 
     if chat_completion_request.stream {
@@ -108,6 +142,10 @@ async fn handle_chat_completions(
         .stream_response(&saved_auth, &upstream_request, &app_state.conversation_id)
         .await?;
     let response_text = collect_openai_response_text(upstream_stream).await?;
+    tracing::info!(
+        response_text_chars = response_text.chars().count(),
+        "collected non-streaming response"
+    );
     Ok((
         StatusCode::OK,
         Json(crate::openai::chat_completion_response(
@@ -303,6 +341,146 @@ fn text_delta_from_event(event_value: Value) -> Option<String> {
                 .next()
                 .map(ToString::to_string)
         })
+}
+
+struct ChatRequestStats {
+    roles: String,
+    text_chars: usize,
+    image_parts: usize,
+}
+
+fn chat_request_stats(chat_completion_request: &ChatCompletionRequest) -> ChatRequestStats {
+    let mut text_chars = 0;
+    let mut image_parts = 0;
+    let roles = chat_completion_request
+        .messages
+        .iter()
+        .map(|message| {
+            match &message.content {
+                crate::openai::ChatMessageContent::Text(text) => {
+                    text_chars += text.chars().count();
+                }
+                crate::openai::ChatMessageContent::Parts(parts) => {
+                    for part in parts {
+                        match part {
+                            crate::openai::ChatMessageContentPart::Text { text } => {
+                                text_chars += text.chars().count();
+                            }
+                            crate::openai::ChatMessageContentPart::ImageUrl { .. } => {
+                                image_parts += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            message.role.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    ChatRequestStats {
+        roles,
+        text_chars,
+        image_parts,
+    }
+}
+
+fn log_json_body(message: &str, body: &Bytes, detailed_logs: bool) {
+    if !log_bodies_enabled(detailed_logs) {
+        return;
+    }
+
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => log_json_value(message, &value, detailed_logs),
+        Err(error) => tracing::info!(
+            error = %error,
+            body_bytes = body.len(),
+            diagnostic = message,
+            "failed to log JSON body"
+        ),
+    }
+}
+
+fn log_json_value(message: &str, value: &Value, detailed_logs: bool) {
+    if !log_bodies_enabled(detailed_logs) {
+        return;
+    }
+
+    tracing::info!(
+        body = %sanitize_json_value(value),
+        diagnostic = message,
+        "JSON body"
+    );
+}
+
+fn log_bodies_enabled(detailed_logs: bool) -> bool {
+    if detailed_logs {
+        return true;
+    }
+
+    matches!(
+        env::var("CODEX_PROXY_LOG_BODIES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+fn sanitize_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_json_value).collect()),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    if key.contains("token")
+                        || key.contains("authorization")
+                        || key.contains("auth")
+                    {
+                        return (key.clone(), Value::String("<redacted>".to_string()));
+                    }
+
+                    (key.clone(), sanitize_json_field(key, value))
+                })
+                .collect(),
+        ),
+        Value::String(text) => Value::String(sanitize_string(text)),
+        _ => value.clone(),
+    }
+}
+
+fn sanitize_json_field(key: &str, value: &Value) -> Value {
+    match value {
+        Value::String(text) if key == "url" || key == "image_url" => {
+            Value::String(sanitize_string(text))
+        }
+        _ => sanitize_json_value(value),
+    }
+}
+
+fn sanitize_string(text: &str) -> String {
+    let Some((mime_type, base64_data)) = text.split_once(";base64,") else {
+        return text.to_string();
+    };
+
+    if !mime_type.starts_with("data:") {
+        return text.to_string();
+    }
+
+    format!("{mime_type};base64,<redacted {} chars>", base64_data.len())
+}
+
+fn count_input_images(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => items.iter().map(count_input_images).sum(),
+        Value::Object(object) => {
+            usize::from(
+                object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|item_type| item_type == "input_image"),
+            ) + object.values().map(count_input_images).sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

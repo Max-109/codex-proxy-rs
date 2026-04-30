@@ -113,5 +113,6 @@ fn codex_backend_headers(
 async fn upstream_status_error(response: reqwest::Response) -> ProxyError {
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    tracing::warn!(status, body, "upstream request failed");
     ProxyError::UpstreamStatus { status, body }
 }
