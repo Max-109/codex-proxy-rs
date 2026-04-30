@@ -3,7 +3,7 @@
 ## Compile
 
 ```bash
-cd /Users/jelenagornostajiene/Documents/GitHub/opencode/codex-proxy
+cd codex-proxy
 cargo build --release
 ```
 
