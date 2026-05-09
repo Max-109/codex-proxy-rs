@@ -1,12 +1,14 @@
 use crate::auth::AuthManager;
 use crate::config::{ProxySettings, ReasoningEffort, SettingsManager, Speed};
 use crate::server::{ServerConfig, run_server};
+use base64::Engine;
 use clap::{Parser, Subcommand};
 use inquire::{
     Confirm, Select, Text,
     error::InquireError,
     ui::{Color, ErrorMessageRenderConfig, RenderConfig, StyleSheet, Styled},
 };
+use rand::RngCore;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -267,6 +269,14 @@ fn run_settings_menu(
                 };
                 settings.detailed_logs = detailed_logs;
             }
+            SettingsAction::ApiKeys => {
+                let Some(api_key_status) = run_api_keys_menu(&mut settings)? else {
+                    continue;
+                };
+                status_message = Some(api_key_status);
+                settings_manager.save(&settings)?;
+                continue;
+            }
         }
 
         settings_manager.save(&settings)?;
@@ -281,6 +291,7 @@ enum SettingsAction {
     Host,
     Port,
     DetailedLogs,
+    ApiKeys,
 }
 
 #[derive(Clone, Debug)]
@@ -316,6 +327,10 @@ fn settings_menu_items(settings: &ProxySettings) -> Vec<SettingsMenuItem> {
         SettingsMenuItem {
             action: SettingsAction::DetailedLogs,
             label: format!("Detailed logs   {}", enabled_label(settings.detailed_logs)),
+        },
+        SettingsMenuItem {
+            action: SettingsAction::ApiKeys,
+            label: format!("API keys        {}", settings.api_keys.len()),
         },
     ]
 }
@@ -379,6 +394,114 @@ fn prompt_detailed_logs(current_detailed_logs: bool) -> anyhow::Result<Option<bo
         Ok(detailed_logs) => Ok(Some(detailed_logs)),
         Err(InquireError::OperationCanceled) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn run_api_keys_menu(settings: &mut ProxySettings) -> anyhow::Result<Option<&'static str>> {
+    loop {
+        clear_terminal();
+        print_section_header("API Keys");
+        print_field("Allowed", settings.api_keys.len());
+        println!();
+
+        let action = match Select::new("API keys", vec![ApiKeysAction::List, ApiKeysAction::Create])
+            .with_render_config(fleety_render_config())
+            .prompt()
+        {
+            Ok(action) => action,
+            Err(InquireError::OperationCanceled) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        match action {
+            ApiKeysAction::List => {
+                if let Some(deleted_key) = run_api_keys_list(settings)? {
+                    settings.api_keys.retain(|api_key| api_key != &deleted_key);
+                    return Ok(Some("API key deleted"));
+                }
+            }
+            ApiKeysAction::Create => {
+                let api_key = new_proxy_api_key();
+                println!();
+                print_field("New key", &api_key);
+                settings.api_keys.push(api_key);
+                wait_for_enter()?;
+                return Ok(Some("API key created"));
+            }
+        }
+    }
+}
+
+fn run_api_keys_list(settings: &ProxySettings) -> anyhow::Result<Option<String>> {
+    if settings.api_keys.is_empty() {
+        println!("No API keys created.");
+        wait_for_enter()?;
+        return Ok(None);
+    }
+
+    let selected_api_key = match Select::new("Allowed API key", settings.api_keys.clone())
+        .with_render_config(fleety_render_config())
+        .prompt()
+    {
+        Ok(api_key) => api_key,
+        Err(InquireError::OperationCanceled) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    let delete_action = match Select::new(
+        "API key action",
+        vec![ApiKeyDeleteAction::Delete, ApiKeyDeleteAction::Cancel],
+    )
+    .with_render_config(fleety_render_config())
+    .prompt()
+    {
+        Ok(action) => action,
+        Err(InquireError::OperationCanceled) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    match delete_action {
+        ApiKeyDeleteAction::Delete => Ok(Some(selected_api_key)),
+        ApiKeyDeleteAction::Cancel => Ok(None),
+    }
+}
+
+fn new_proxy_api_key() -> String {
+    let mut random_bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+    format!(
+        "cp_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ApiKeysAction {
+    List,
+    Create,
+}
+
+impl std::fmt::Display for ApiKeysAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::List => write!(formatter, "List"),
+            Self::Create => write!(formatter, "Create"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ApiKeyDeleteAction {
+    Delete,
+    Cancel,
+}
+
+impl std::fmt::Display for ApiKeyDeleteAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delete => write!(formatter, "Delete"),
+            Self::Cancel => write!(formatter, "Cancel"),
+        }
     }
 }
 
@@ -600,4 +723,15 @@ fn paint(value: impl std::fmt::Display, color: FleetyTerminalColor) -> String {
 fn clear_terminal() {
     print!("\x1b[2J\x1b[H");
     let _ = io::stdout().flush();
+}
+
+fn wait_for_enter() -> anyhow::Result<()> {
+    print!(
+        "{}",
+        paint("Press Enter to continue...", FleetyTerminalColor::Muted)
+    );
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(())
 }

@@ -10,8 +10,8 @@ use axum::body::{Body, Bytes};
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
-use axum::http::header::{CONTENT_LENGTH, USER_AGENT};
-use axum::http::{HeaderValue, Request, StatusCode};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, USER_AGENT};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -80,8 +80,11 @@ async fn handle_models() -> Json<crate::openai::ModelsResponse> {
 
 async fn handle_chat_completions(
     State(app_state): State<AppState>,
+    request_headers: HeaderMap,
     request_body: Bytes,
 ) -> Result<Response, ProxyError> {
+    require_proxy_api_key(&request_headers, &app_state.settings)?;
+
     log_json_body(
         "client chat completion body",
         &request_body,
@@ -154,6 +157,36 @@ async fn handle_chat_completions(
         )),
     )
         .into_response())
+}
+
+fn require_proxy_api_key(
+    request_headers: &HeaderMap,
+    settings: &ProxySettings,
+) -> Result<(), ProxyError> {
+    let Some(api_key) = bearer_token(request_headers) else {
+        tracing::warn!("chat completion request missing proxy API key");
+        return Err(ProxyError::InvalidProxyApiKey);
+    };
+
+    if settings
+        .api_keys
+        .iter()
+        .any(|allowed_key| allowed_key == api_key)
+    {
+        return Ok(());
+    }
+
+    tracing::warn!("chat completion request used invalid proxy API key");
+    Err(ProxyError::InvalidProxyApiKey)
+}
+
+fn bearer_token(request_headers: &HeaderMap) -> Option<&str> {
+    request_headers
+        .get(AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|api_key| !api_key.is_empty())
 }
 
 fn new_conversation_id() -> String {
@@ -529,6 +562,22 @@ mod tests {
             extract_text_deltas_from_buffer(&mut upstream_buffer, "lo\"}\n"),
             vec!["hello".to_string()]
         );
+    }
+
+    #[test]
+    fn chat_requests_require_allowed_proxy_api_key() {
+        let mut headers = HeaderMap::new();
+        let mut settings = ProxySettings::default();
+        settings.api_keys = vec!["cp_allowed".to_string()];
+
+        assert!(matches!(
+            require_proxy_api_key(&headers, &settings),
+            Err(ProxyError::InvalidProxyApiKey)
+        ));
+
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer cp_allowed"));
+
+        assert!(require_proxy_api_key(&headers, &settings).is_ok());
     }
 
     #[tokio::test]

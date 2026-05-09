@@ -49,6 +49,9 @@ pub enum ProxyError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("missing or invalid proxy API key")]
+    InvalidProxyApiKey,
+
     #[error("login failed: {0}")]
     Login(String),
 }
@@ -56,7 +59,9 @@ pub enum ProxyError {
 impl ProxyError {
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::MissingAuth | Self::MissingRefreshToken => StatusCode::UNAUTHORIZED,
+            Self::MissingAuth | Self::MissingRefreshToken | Self::InvalidProxyApiKey => {
+                StatusCode::UNAUTHORIZED
+            }
             Self::InvalidRequest(_) | Self::ParseAuth(_) | Self::ParseSettings(_) => {
                 StatusCode::BAD_REQUEST
             }
