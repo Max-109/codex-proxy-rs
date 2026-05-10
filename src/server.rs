@@ -349,6 +349,11 @@ fn extract_text_deltas(upstream_chunk: &str) -> Vec<String> {
 }
 
 fn text_delta_from_event(event_value: Value) -> Option<String> {
+    let event_type = event_value.get("type").and_then(Value::as_str);
+    if event_type.is_some_and(|event_type| !event_type.ends_with(".delta")) {
+        return None;
+    }
+
     event_value
         .get("delta")
         .and_then(Value::as_str)
@@ -363,15 +368,6 @@ fn text_delta_from_event(event_value: Value) -> Option<String> {
             event_value
                 .get("output_text")
                 .and_then(Value::as_str)
-                .map(ToString::to_string)
-        })
-        .or_else(|| {
-            event_value
-                .get("content")
-                .and_then(Value::as_array)?
-                .iter()
-                .filter_map(|content_item| content_item.get("text").and_then(Value::as_str))
-                .next()
                 .map(ToString::to_string)
         })
 }
@@ -548,6 +544,18 @@ mod tests {
             extract_text_deltas(&upstream_chunk),
             vec!["hello".to_string(), " world".to_string()]
         );
+    }
+
+    #[test]
+    fn stream_delta_extractor_ignores_completed_full_content() {
+        let upstream_chunk = [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"cure-all\"}",
+            "data: {\"type\":\"response.completed\",\"content\":[{\"text\":\"cure-all\"}]}",
+            "data: [DONE]",
+        ]
+        .join("\n");
+
+        assert_eq!(extract_text_deltas(&upstream_chunk), vec!["cure-all".to_string()]);
     }
 
     #[test]
