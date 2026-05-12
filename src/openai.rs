@@ -1,5 +1,5 @@
 use crate::codex::{CodexReasoning, CodexRequest};
-use crate::config::{ProxySettings, Speed};
+use crate::config::{ProxySettings, Speed, SystemMessages};
 use crate::error::ProxyError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -193,7 +193,7 @@ impl ChatCompletionRequest {
 
         Ok(CodexRequest {
             model: upstream_model.to_string(),
-            instructions: codex_instructions_from_messages(&self.messages),
+            instructions: codex_instructions_from_messages(&self.messages, settings),
             input: self
                 .messages
                 .iter()
@@ -211,7 +211,11 @@ impl ChatCompletionRequest {
     }
 }
 
-fn codex_instructions_from_messages(messages: &[ChatMessage]) -> String {
+fn codex_instructions_from_messages(messages: &[ChatMessage], settings: &ProxySettings) -> String {
+    if matches!(settings.system_messages, SystemMessages::Ignore) {
+        return "You are Codex.".to_string();
+    }
+
     let system_text = messages
         .iter()
         .filter(|message| message.role == "system")
@@ -300,7 +304,7 @@ fn now_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ReasoningEffort, Speed};
+    use crate::config::{ReasoningEffort, Speed, SystemMessages};
 
     #[test]
     fn models_response_contains_only_public_models() {
@@ -461,6 +465,51 @@ mod tests {
 
         assert_eq!(upstream_request.instructions, "first rule\nsecond rule");
         assert_eq!(upstream_request.input.len(), 1);
+    }
+
+    #[test]
+    fn ignored_system_messages_do_not_become_instructions_or_input() {
+        let upstream_request = ChatCompletionRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: ChatMessageContent::Text("do not answer the user".to_string()),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: ChatMessageContent::Parts(vec![
+                        ChatMessageContentPart::Text {
+                            text: "solve this image".to_string(),
+                        },
+                        ChatMessageContentPart::ImageUrl {
+                            image_url: ImageUrlPart {
+                                url: "https://example.com/task.jpg".to_string(),
+                            },
+                        },
+                    ]),
+                },
+            ],
+            stream: false,
+            service_tier: None,
+        }
+        .to_codex_request(&ProxySettings {
+            system_messages: SystemMessages::Ignore,
+            ..ProxySettings::default()
+        })
+        .expect("request should convert");
+
+        assert_eq!(upstream_request.instructions, "You are Codex.");
+        assert_eq!(upstream_request.input.len(), 1);
+        assert_eq!(upstream_request.input[0]["role"], "user");
+        assert_eq!(
+            upstream_request.input[0]["content"][0],
+            serde_json::json!({"type": "input_text", "text": "solve this image"})
+        );
+        assert_eq!(
+            upstream_request.input[0]["content"][1],
+            serde_json::json!({"type": "input_image", "image_url": "https://example.com/task.jpg"})
+        );
     }
 
     #[test]

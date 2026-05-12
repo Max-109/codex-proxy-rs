@@ -555,7 +555,10 @@ mod tests {
         ]
         .join("\n");
 
-        assert_eq!(extract_text_deltas(&upstream_chunk), vec!["cure-all".to_string()]);
+        assert_eq!(
+            extract_text_deltas(&upstream_chunk),
+            vec!["cure-all".to_string()]
+        );
     }
 
     #[test]

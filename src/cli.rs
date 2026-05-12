@@ -1,5 +1,5 @@
 use crate::auth::AuthManager;
-use crate::config::{ProxySettings, ReasoningEffort, SettingsManager, Speed};
+use crate::config::{ProxySettings, ReasoningEffort, SettingsManager, Speed, SystemMessages};
 use crate::server::{ServerConfig, run_server};
 use base64::Engine;
 use clap::{Parser, Subcommand};
@@ -251,6 +251,21 @@ fn run_settings_menu(
                 };
                 settings.speed = selected_speed;
             }
+            SettingsAction::SystemMessages => {
+                let selected_system_messages = match Select::new(
+                    "System messages",
+                    vec![SystemMessages::PassThrough, SystemMessages::Ignore],
+                )
+                .with_starting_cursor(system_messages_index(settings.system_messages))
+                .with_render_config(fleety_render_config())
+                .prompt()
+                {
+                    Ok(system_messages) => system_messages,
+                    Err(InquireError::OperationCanceled) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                settings.system_messages = selected_system_messages;
+            }
             SettingsAction::Host => {
                 let Some(host) = prompt_host(settings.host)? else {
                     continue;
@@ -288,6 +303,7 @@ fn run_settings_menu(
 enum SettingsAction {
     ReasoningEffort,
     Speed,
+    SystemMessages,
     Host,
     Port,
     DetailedLogs,
@@ -315,6 +331,10 @@ fn settings_menu_items(settings: &ProxySettings) -> Vec<SettingsMenuItem> {
         SettingsMenuItem {
             action: SettingsAction::Speed,
             label: format!("Speed           {}", settings.speed),
+        },
+        SettingsMenuItem {
+            action: SettingsAction::SystemMessages,
+            label: format!("System messages {}", settings.system_messages),
         },
         SettingsMenuItem {
             action: SettingsAction::Host,
@@ -350,6 +370,13 @@ fn speed_index(speed: Speed) -> usize {
     match speed {
         Speed::Normal => 0,
         Speed::Fast => 1,
+    }
+}
+
+fn system_messages_index(system_messages: SystemMessages) -> usize {
+    match system_messages {
+        SystemMessages::PassThrough => 0,
+        SystemMessages::Ignore => 1,
     }
 }
 
@@ -597,6 +624,7 @@ fn print_menu_header(auth_manager: &AuthManager, settings: &ProxySettings) {
     print_field("Auth", auth_status(auth_manager));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("System messages", settings.system_messages);
     print_field("Logs", enabled_label(settings.detailed_logs));
     println!();
 }
@@ -623,6 +651,7 @@ fn print_starting_proxy(settings: &ProxySettings, host: IpAddr, port: u16) {
     print_field("Endpoint", endpoint(host, port));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("System messages", settings.system_messages);
     print_field("Logs", enabled_label(settings.detailed_logs));
     println!();
 }
