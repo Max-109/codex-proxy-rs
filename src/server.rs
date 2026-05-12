@@ -47,6 +47,14 @@ pub async fn run_server(server_config: ServerConfig) -> anyhow::Result<()> {
     let bound_address = tcp_listener.local_addr()?;
 
     tracing::info!("codex-proxy listening on http://{bound_address}/v1");
+    if let Some(system_prompt) = server_config.settings.injected_system_prompt()? {
+        tracing::info!(
+            system_prompt_file = %server_config.settings.system_prompt_file.display(),
+            system_prompt_chars = system_prompt.chars().count(),
+            system_prompt = %system_prompt,
+            "using injected system prompt"
+        );
+    }
     let conversation_id = new_conversation_id();
     tracing::info!(conversation_id, "using codex prompt cache key");
 

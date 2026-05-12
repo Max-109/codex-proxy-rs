@@ -1,5 +1,5 @@
 use crate::codex::{CodexReasoning, CodexRequest};
-use crate::config::{ProxySettings, Speed, SystemMessages};
+use crate::config::{ProxySettings, Speed};
 use crate::error::ProxyError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -193,7 +193,7 @@ impl ChatCompletionRequest {
 
         Ok(CodexRequest {
             model: upstream_model.to_string(),
-            instructions: codex_instructions_from_messages(&self.messages, settings),
+            instructions: codex_instructions_from_messages(&self.messages, settings)?,
             input: self
                 .messages
                 .iter()
@@ -211,9 +211,12 @@ impl ChatCompletionRequest {
     }
 }
 
-fn codex_instructions_from_messages(messages: &[ChatMessage], settings: &ProxySettings) -> String {
-    if matches!(settings.system_messages, SystemMessages::Ignore) {
-        return "You are Codex.".to_string();
+fn codex_instructions_from_messages(
+    messages: &[ChatMessage],
+    settings: &ProxySettings,
+) -> Result<String, ProxyError> {
+    if let Some(system_prompt) = settings.injected_system_prompt()? {
+        return Ok(system_prompt);
     }
 
     let system_text = messages
@@ -224,10 +227,10 @@ fn codex_instructions_from_messages(messages: &[ChatMessage], settings: &ProxySe
         .join("\n\n");
 
     if system_text.is_empty() {
-        return "You are Codex.".to_string();
+        return Ok("You are Codex.".to_string());
     }
 
-    system_text
+    Ok(system_text)
 }
 
 fn chat_message_text(chat_message: &ChatMessage) -> Option<String> {
@@ -305,6 +308,7 @@ fn now_seconds() -> u64 {
 mod tests {
     use super::*;
     use crate::config::{ReasoningEffort, Speed, SystemMessages};
+    use std::path::PathBuf;
 
     #[test]
     fn models_response_contains_only_public_models() {
@@ -469,6 +473,7 @@ mod tests {
 
     #[test]
     fn ignored_system_messages_do_not_become_instructions_or_input() {
+        let system_prompt_file = write_test_system_prompt("Follow only the user prompt.");
         let upstream_request = ChatCompletionRequest {
             model: "gpt-5.5".to_string(),
             messages: vec![
@@ -495,11 +500,15 @@ mod tests {
         }
         .to_codex_request(&ProxySettings {
             system_messages: SystemMessages::Ignore,
+            system_prompt_file,
             ..ProxySettings::default()
         })
         .expect("request should convert");
 
-        assert_eq!(upstream_request.instructions, "You are Codex.");
+        assert_eq!(
+            upstream_request.instructions,
+            "Follow only the user prompt."
+        );
         assert_eq!(upstream_request.input.len(), 1);
         assert_eq!(upstream_request.input[0]["role"], "user");
         assert_eq!(
@@ -510,6 +519,32 @@ mod tests {
             upstream_request.input[0]["content"][1],
             serde_json::json!({"type": "input_image", "image_url": "https://example.com/task.jpg"})
         );
+    }
+
+    #[test]
+    fn ignored_system_messages_require_system_prompt_file() {
+        let missing_system_prompt_file =
+            std::env::temp_dir().join(format!("missing-codex-proxy-system-{}.md", now_seconds()));
+        let conversion_error = ChatCompletionRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatMessageContent::Text("hello".to_string()),
+            }],
+            stream: false,
+            service_tier: None,
+        }
+        .to_codex_request(&ProxySettings {
+            system_messages: SystemMessages::Ignore,
+            system_prompt_file: missing_system_prompt_file,
+            ..ProxySettings::default()
+        })
+        .expect_err("missing system prompt should fail");
+
+        assert!(matches!(
+            conversion_error,
+            ProxyError::ReadSystemPrompt { .. }
+        ));
     }
 
     #[test]
@@ -537,5 +572,12 @@ mod tests {
     #[test]
     fn default_settings_keep_detailed_logs_off() {
         assert!(!ProxySettings::default().detailed_logs);
+    }
+
+    fn write_test_system_prompt(contents: &str) -> PathBuf {
+        let system_prompt_file =
+            std::env::temp_dir().join(format!("codex-proxy-system-{}.md", now_seconds()));
+        std::fs::write(&system_prompt_file, contents).expect("test prompt should write");
+        system_prompt_file
     }
 }

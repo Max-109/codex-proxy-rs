@@ -11,6 +11,7 @@ pub struct ProxySettings {
     pub reasoning_effort: ReasoningEffort,
     pub speed: Speed,
     pub system_messages: SystemMessages,
+    pub system_prompt_file: PathBuf,
     pub host: IpAddr,
     pub port: u16,
     pub detailed_logs: bool,
@@ -49,12 +50,28 @@ pub struct SettingsManager {
     settings_file: PathBuf,
 }
 
+impl ProxySettings {
+    pub fn injected_system_prompt(&self) -> Result<Option<String>, ProxyError> {
+        if !matches!(self.system_messages, SystemMessages::Ignore) {
+            return Ok(None);
+        }
+
+        std::fs::read_to_string(&self.system_prompt_file)
+            .map(Some)
+            .map_err(|source| ProxyError::ReadSystemPrompt {
+                path: self.system_prompt_file.clone(),
+                source,
+            })
+    }
+}
+
 impl Default for ProxySettings {
     fn default() -> Self {
         Self {
             reasoning_effort: ReasoningEffort::Medium,
             speed: Speed::Normal,
             system_messages: SystemMessages::PassThrough,
+            system_prompt_file: PathBuf::from("system.md"),
             host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             port: 8080,
             detailed_logs: false,
