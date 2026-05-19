@@ -25,12 +25,6 @@ pub enum ProxyError {
     #[error("failed to read settings file: {0}")]
     ReadSettings(std::io::Error),
 
-    #[error("failed to read system prompt file `{path}`: {source}")]
-    ReadSystemPrompt {
-        path: std::path::PathBuf,
-        source: std::io::Error,
-    },
-
     #[error("failed to write settings file: {0}")]
     WriteSettings(std::io::Error),
 
@@ -71,7 +65,6 @@ impl ProxyError {
             Self::InvalidRequest(_) | Self::ParseAuth(_) | Self::ParseSettings(_) => {
                 StatusCode::BAD_REQUEST
             }
-            Self::ReadSystemPrompt { .. } => StatusCode::BAD_REQUEST,
             Self::OAuthStatus { status, .. } | Self::UpstreamStatus { status, .. } => {
                 StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
             }

@@ -12,8 +12,6 @@ pub struct ProxySettings {
     pub speed: Speed,
     #[serde(default = "default_priority_service")]
     pub priority_service: bool,
-    pub system_messages: SystemMessages,
-    pub system_prompt_file: PathBuf,
     pub host: IpAddr,
     pub port: u16,
     pub detailed_logs: bool,
@@ -40,14 +38,6 @@ pub enum Speed {
     Fast,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SystemMessages {
-    #[default]
-    PassThrough,
-    Ignore,
-}
-
 pub struct SettingsManager {
     settings_file: PathBuf,
 }
@@ -56,29 +46,12 @@ fn default_priority_service() -> bool {
     true
 }
 
-impl ProxySettings {
-    pub fn injected_system_prompt(&self) -> Result<Option<String>, ProxyError> {
-        if !matches!(self.system_messages, SystemMessages::Ignore) {
-            return Ok(None);
-        }
-
-        std::fs::read_to_string(&self.system_prompt_file)
-            .map(Some)
-            .map_err(|source| ProxyError::ReadSystemPrompt {
-                path: self.system_prompt_file.clone(),
-                source,
-            })
-    }
-}
-
 impl Default for ProxySettings {
     fn default() -> Self {
         Self {
             reasoning_effort: ReasoningEffort::Medium,
             speed: Speed::Normal,
             priority_service: true,
-            system_messages: SystemMessages::PassThrough,
-            system_prompt_file: PathBuf::from("system.md"),
             host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             port: 8080,
             detailed_logs: false,
@@ -118,15 +91,6 @@ impl std::fmt::Display for Speed {
         match self {
             Self::Normal => write!(formatter, "normal"),
             Self::Fast => write!(formatter, "fast"),
-        }
-    }
-}
-
-impl std::fmt::Display for SystemMessages {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PassThrough => write!(formatter, "pass through"),
-            Self::Ignore => write!(formatter, "ignore"),
         }
     }
 }

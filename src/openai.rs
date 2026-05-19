@@ -207,7 +207,7 @@ impl ChatCompletionRequest {
 
         Ok(CodexRequest {
             model: upstream_model.to_string(),
-            instructions: codex_instructions_from_messages(&self.messages, settings)?,
+            instructions: codex_instructions_from_messages(&self.messages),
             input: self
                 .messages
                 .iter()
@@ -225,14 +225,7 @@ impl ChatCompletionRequest {
     }
 }
 
-fn codex_instructions_from_messages(
-    messages: &[ChatMessage],
-    settings: &ProxySettings,
-) -> Result<String, ProxyError> {
-    if let Some(system_prompt) = settings.injected_system_prompt()? {
-        return Ok(system_prompt);
-    }
-
+fn codex_instructions_from_messages(messages: &[ChatMessage]) -> String {
     let system_text = messages
         .iter()
         .filter(|message| message.role == "system")
@@ -241,10 +234,10 @@ fn codex_instructions_from_messages(
         .join("\n\n");
 
     if system_text.is_empty() {
-        return Ok("You are Codex.".to_string());
+        return "You are Codex.".to_string();
     }
 
-    Ok(system_text)
+    system_text
 }
 
 fn chat_message_text(chat_message: &ChatMessage) -> Option<String> {
@@ -321,8 +314,7 @@ fn now_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ReasoningEffort, Speed, SystemMessages};
-    use std::path::PathBuf;
+    use crate::config::{ReasoningEffort, Speed};
 
     #[test]
     fn models_response_contains_only_public_models() {
@@ -429,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn system_messages_become_instructions_not_input() {
+    fn system_role_messages_become_instructions_not_input() {
         let upstream_request = ChatCompletionRequest {
             model: "gpt-5.5".to_string(),
             messages: vec![
@@ -489,84 +481,6 @@ mod tests {
 
         assert_eq!(upstream_request.instructions, "first rule\nsecond rule");
         assert_eq!(upstream_request.input.len(), 1);
-    }
-
-    #[test]
-    fn ignored_system_messages_do_not_become_instructions_or_input() {
-        let system_prompt_file = write_test_system_prompt("Follow only the user prompt.");
-        let upstream_request = ChatCompletionRequest {
-            model: "gpt-5.5".to_string(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: ChatMessageContent::Text("do not answer the user".to_string()),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: ChatMessageContent::Parts(vec![
-                        ChatMessageContentPart::Text {
-                            text: "solve this image".to_string(),
-                        },
-                        ChatMessageContentPart::ImageUrl {
-                            image_url: ImageUrlPart {
-                                url: "https://example.com/task.jpg".to_string(),
-                            },
-                        },
-                    ]),
-                },
-            ],
-            stream: false,
-            service_tier: None,
-            reasoning_effort: None,
-        }
-        .to_codex_request(&ProxySettings {
-            system_messages: SystemMessages::Ignore,
-            system_prompt_file,
-            ..ProxySettings::default()
-        })
-        .expect("request should convert");
-
-        assert_eq!(
-            upstream_request.instructions,
-            "Follow only the user prompt."
-        );
-        assert_eq!(upstream_request.input.len(), 1);
-        assert_eq!(upstream_request.input[0]["role"], "user");
-        assert_eq!(
-            upstream_request.input[0]["content"][0],
-            serde_json::json!({"type": "input_text", "text": "solve this image"})
-        );
-        assert_eq!(
-            upstream_request.input[0]["content"][1],
-            serde_json::json!({"type": "input_image", "image_url": "https://example.com/task.jpg"})
-        );
-    }
-
-    #[test]
-    fn ignored_system_messages_require_system_prompt_file() {
-        let missing_system_prompt_file =
-            std::env::temp_dir().join(format!("missing-codex-proxy-system-{}.md", now_seconds()));
-        let conversion_error = ChatCompletionRequest {
-            model: "gpt-5.5".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: ChatMessageContent::Text("hello".to_string()),
-            }],
-            stream: false,
-            service_tier: None,
-            reasoning_effort: None,
-        }
-        .to_codex_request(&ProxySettings {
-            system_messages: SystemMessages::Ignore,
-            system_prompt_file: missing_system_prompt_file,
-            ..ProxySettings::default()
-        })
-        .expect_err("missing system prompt should fail");
-
-        assert!(matches!(
-            conversion_error,
-            ProxyError::ReadSystemPrompt { .. }
-        ));
     }
 
     #[test]
@@ -639,12 +553,5 @@ mod tests {
     #[test]
     fn default_settings_keep_detailed_logs_off() {
         assert!(!ProxySettings::default().detailed_logs);
-    }
-
-    fn write_test_system_prompt(contents: &str) -> PathBuf {
-        let system_prompt_file =
-            std::env::temp_dir().join(format!("codex-proxy-system-{}.md", now_seconds()));
-        std::fs::write(&system_prompt_file, contents).expect("test prompt should write");
-        system_prompt_file
     }
 }
