@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub struct ProxySettings {
     pub reasoning_effort: ReasoningEffort,
     pub speed: Speed,
+    #[serde(default = "default_priority_service")]
+    pub priority_service: bool,
     pub system_messages: SystemMessages,
     pub system_prompt_file: PathBuf,
     pub host: IpAddr,
@@ -50,6 +52,10 @@ pub struct SettingsManager {
     settings_file: PathBuf,
 }
 
+fn default_priority_service() -> bool {
+    true
+}
+
 impl ProxySettings {
     pub fn injected_system_prompt(&self) -> Result<Option<String>, ProxyError> {
         if !matches!(self.system_messages, SystemMessages::Ignore) {
@@ -70,6 +76,7 @@ impl Default for ProxySettings {
         Self {
             reasoning_effort: ReasoningEffort::Medium,
             speed: Speed::Normal,
+            priority_service: true,
             system_messages: SystemMessages::PassThrough,
             system_prompt_file: PathBuf::from("system.md"),
             host: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),

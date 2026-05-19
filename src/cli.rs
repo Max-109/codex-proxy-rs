@@ -251,6 +251,13 @@ fn run_settings_menu(
                 };
                 settings.speed = selected_speed;
             }
+            SettingsAction::PriorityService => {
+                let Some(priority_service) = prompt_priority_service(settings.priority_service)?
+                else {
+                    continue;
+                };
+                settings.priority_service = priority_service;
+            }
             SettingsAction::SystemMessages => {
                 let selected_system_messages = match Select::new(
                     "System messages",
@@ -303,6 +310,7 @@ fn run_settings_menu(
 enum SettingsAction {
     ReasoningEffort,
     Speed,
+    PriorityService,
     SystemMessages,
     Host,
     Port,
@@ -331,6 +339,13 @@ fn settings_menu_items(settings: &ProxySettings) -> Vec<SettingsMenuItem> {
         SettingsMenuItem {
             action: SettingsAction::Speed,
             label: format!("Speed           {}", settings.speed),
+        },
+        SettingsMenuItem {
+            action: SettingsAction::PriorityService,
+            label: format!(
+                "Priority service {}",
+                enabled_label(settings.priority_service)
+            ),
         },
         SettingsMenuItem {
             action: SettingsAction::SystemMessages,
@@ -419,6 +434,18 @@ fn prompt_detailed_logs(current_detailed_logs: bool) -> anyhow::Result<Option<bo
         .prompt()
     {
         Ok(detailed_logs) => Ok(Some(detailed_logs)),
+        Err(InquireError::OperationCanceled) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn prompt_priority_service(current_priority_service: bool) -> anyhow::Result<Option<bool>> {
+    match Confirm::new("Priority service")
+        .with_default(current_priority_service)
+        .with_render_config(fleety_render_config())
+        .prompt()
+    {
+        Ok(priority_service) => Ok(Some(priority_service)),
         Err(InquireError::OperationCanceled) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -624,6 +651,7 @@ fn print_menu_header(auth_manager: &AuthManager, settings: &ProxySettings) {
     print_field("Auth", auth_status(auth_manager));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("Priority", enabled_label(settings.priority_service));
     print_field("System messages", settings.system_messages);
     print_field("Logs", enabled_label(settings.detailed_logs));
     println!();
@@ -651,6 +679,7 @@ fn print_starting_proxy(settings: &ProxySettings, host: IpAddr, port: u16) {
     print_field("Endpoint", endpoint(host, port));
     print_field("Reasoning", settings.reasoning_effort);
     print_field("Speed", settings.speed);
+    print_field("Priority", enabled_label(settings.priority_service));
     print_field("System messages", settings.system_messages);
     print_field("Logs", enabled_label(settings.detailed_logs));
     println!();

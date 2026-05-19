@@ -1,5 +1,5 @@
 use crate::codex::{CodexReasoning, CodexRequest};
-use crate::config::{ProxySettings, Speed};
+use crate::config::{ProxySettings, ReasoningEffort, Speed};
 use crate::error::ProxyError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +12,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub stream: bool,
     pub service_tier: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,12 +185,25 @@ impl ChatCompletionRequest {
             self.model.as_str()
         };
         let upstream_service_tier = match self.service_tier.as_deref() {
-            Some("fast") | Some("priority") => Some("priority".to_string()),
+            Some("none") => None,
+            Some("fast") | Some("priority") if settings.priority_service => {
+                Some("priority".to_string())
+            }
+            Some("fast") | Some("priority") => None,
             Some(service_tier) => Some(service_tier.to_string()),
-            None if self.model == "gpt-5.5-fast" => Some("priority".to_string()),
-            None if matches!(settings.speed, Speed::Fast) => Some("priority".to_string()),
+            None if self.model == "gpt-5.5-fast" && settings.priority_service => {
+                Some("priority".to_string())
+            }
+            None if matches!(settings.speed, Speed::Fast) && settings.priority_service => {
+                Some("priority".to_string())
+            }
             None => None,
         };
+        let reasoning_effort = self
+            .reasoning_effort
+            .unwrap_or(settings.reasoning_effort)
+            .as_upstream_value()
+            .to_string();
 
         Ok(CodexRequest {
             model: upstream_model.to_string(),
@@ -201,7 +215,7 @@ impl ChatCompletionRequest {
                 .map(chat_message_to_codex_input)
                 .collect::<Result<Vec<_>, _>>()?,
             reasoning: CodexReasoning {
-                effort: settings.reasoning_effort.as_upstream_value().to_string(),
+                effort: reasoning_effort,
             },
             stream: true,
             store: false,
@@ -332,6 +346,7 @@ mod tests {
             }],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -353,6 +368,7 @@ mod tests {
             }],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -370,6 +386,7 @@ mod tests {
             }],
             stream: false,
             service_tier: Some("fast".to_string()),
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -396,6 +413,7 @@ mod tests {
             }],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -426,6 +444,7 @@ mod tests {
             ],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -463,6 +482,7 @@ mod tests {
             ],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings::default())
         .expect("request should convert");
@@ -497,6 +517,7 @@ mod tests {
             ],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings {
             system_messages: SystemMessages::Ignore,
@@ -533,6 +554,7 @@ mod tests {
             }],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings {
             system_messages: SystemMessages::Ignore,
@@ -557,6 +579,7 @@ mod tests {
             }],
             stream: false,
             service_tier: None,
+            reasoning_effort: None,
         }
         .to_codex_request(&ProxySettings {
             reasoning_effort: ReasoningEffort::High,
@@ -567,6 +590,50 @@ mod tests {
 
         assert_eq!(upstream_request.reasoning.effort, "high");
         assert_eq!(upstream_request.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn request_reasoning_effort_overrides_settings_default() {
+        let upstream_request = ChatCompletionRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatMessageContent::Text("hello".to_string()),
+            }],
+            stream: false,
+            service_tier: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+        }
+        .to_codex_request(&ProxySettings {
+            reasoning_effort: ReasoningEffort::High,
+            ..ProxySettings::default()
+        })
+        .expect("request should convert");
+
+        assert_eq!(upstream_request.reasoning.effort, "low");
+    }
+
+    #[test]
+    fn priority_service_can_be_disabled() {
+        let upstream_request = ChatCompletionRequest {
+            model: "gpt-5.5-fast".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatMessageContent::Text("hello".to_string()),
+            }],
+            stream: false,
+            service_tier: Some("fast".to_string()),
+            reasoning_effort: None,
+        }
+        .to_codex_request(&ProxySettings {
+            speed: Speed::Fast,
+            priority_service: false,
+            ..ProxySettings::default()
+        })
+        .expect("request should convert");
+
+        assert_eq!(upstream_request.model, "gpt-5.5");
+        assert!(upstream_request.service_tier.is_none());
     }
 
     #[test]
